@@ -1,0 +1,74 @@
+<html>
+    <head>
+        <script type="text/javascript" src="/dygraph.js"></script>
+        <link rel="stylesheet" src="/dygraph.css" />
+        <style>
+        </style>
+    </head>
+    <body>
+        <div style="width:100%; height:90%;" id="graphdiv"></div>
+        <br/><button onclick="updatePlot()">Refresh</button>
+        <script>
+function getBuffer(callback) {
+    var oReq = new XMLHttpRequest();
+    oReq.responseType = "arraybuffer";
+    oReq.open("GET", "/buffer", true);
+    oReq.onload = function(oEvent) {
+        var arrayBuffer = this.response;
+        if (arrayBuffer) {
+            var samplesArray = new Uint16Array(arrayBuffer);
+            callback(samplesArray);
+        }
+    };
+    oReq.send(null);
+}
+
+var data = [[0,-1,-1,-1,-1,-1,-1,-1,-1]];
+var plot = new Dygraph(document.getElementById("graphdiv"), data, {
+    labels: [ "x", "ch0", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7" ]
+});
+
+function updatePlot() { 
+    getBuffer(function(samples) {
+        var data = [];
+        console.log(samples);
+        var idx = 0;
+        var firstChannel = samples[samples.length-1] >> 12;
+        // FIXME: Sometimes samples are lost :(
+
+        var channelSamples = [0,0,0,0,0,0,0,0];
+        for (var i = 0; i < samples.length; i++) {
+            var channel = samples[i] >> 12;
+            channelSamples[channel]++;
+        }
+        console.log(channelSamples);
+
+        var max = (arr) => arr.reduce((a, b) => a > b ? a : b, 0);;
+        var totalSamples = max(channelSamples);
+        for (var i = 0; i < totalSamples; i++) {
+            data[i] = [i,-1,-1,-1,-1,-1,-1,-1,-1];
+        }
+
+        var channelIndices = [0,0,0,0,0,0,0,0];
+        var lastIdx = 0;
+        for (var i = 0; i < samples.length; i++) {
+            var pos = i ^ 1;
+            var channel = samples[pos] >> 12;
+            var sample = samples[pos] & 0xfff;
+
+            var idx = channelIndices[channel];
+            if (idx < lastIdx) { idx = lastIdx; }
+            channelIndices[channel] = idx + 1;
+
+            data[idx][1+channel] = sample;
+        }
+        console.log(channelIndices);
+        plot.updateOptions({'file':data});
+    });
+}
+
+updatePlot();
+
+        </script>
+    </body>
+</html>
