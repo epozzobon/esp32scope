@@ -11,7 +11,9 @@ This is an attempt to port the HorrorScope (https://github.com/albert-spruyt/Hor
 - Resolution: 12 bits
 
 ## I2S ADC access
-I don't really understand the I2S ADC code myself, I mostly copied it from the "i2s-adc-scale" example found on the forum.
+I don't really understand the I2S ADC code myself, I mostly copied it from the "i2s_adc_scale.tar.gz" example found on the forum.
+
+https://www.esp32.com/viewtopic.php?t=2346#p37378
 
 ```C
 /*  Since IDF has not added this function yet, it needs to be manually added by the user (driver/rtc_module.c) */

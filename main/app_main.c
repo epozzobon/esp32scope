@@ -2,13 +2,17 @@
 #include <sys/cdefs.h>
 #include <stdio.h>
 #include <string.h>
+
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
+
 #include "driver/i2s.h"
 #include "driver/adc.h"
 #include "driver/ledc.h"
 #include "driver/uart.h"
-#include "freertos/event_groups.h"
+
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event_loop.h"
@@ -17,9 +21,8 @@
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
-
 #include "lwip/sockets.h"
-#include <lwip/netdb.h>
+#include "lwip/netdb.h"
 
 #include "dig_i2s_adc.h"
 #include "pages.h"
@@ -31,12 +34,12 @@
 
 #define I2S_ADC_UNIT            (ADC_UNIT_1)
 #define BUF_LEN                 CONFIG_CAPTURE_BUF_LEN
-#define UDP_MAX_SIZE            1400
+#define DEFAULT_CLK_DIV         10
+#define DEFAULT_CHANNELS_MASK   0x01
 #define MAX_CLIENTS             1
 #define RX_BUF_SIZE             128
 
 uint16_t buf[BUF_LEN];
-uint8_t pktbuf[UDP_MAX_SIZE];
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t wifi_event_group;
@@ -164,49 +167,58 @@ void wifi_init_sta()
 }
 
 
-//Out put WS signal from gpio18(only for debug mode)
-void i2s_adc_check_clk(void)
-{
-    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[18], PIN_FUNC_GPIO);
-    gpio_set_direction(18, GPIO_MODE_DEF_OUTPUT);
-    gpio_matrix_out(18, I2S0I_WS_OUT_IDX, 0, 0);
-}
-
 esp_err_t i2s_adc_setup(uint8_t channels, int clock_div)
 {
+    esp_err_t ret;
+    adc_channel_t channel[8];
     const adc_channel_t all_channels[] = {
         ADC1_CHANNEL_0, ADC1_CHANNEL_1, ADC1_CHANNEL_2, ADC1_CHANNEL_3,
         ADC1_CHANNEL_4, ADC1_CHANNEL_5, ADC1_CHANNEL_6, ADC1_CHANNEL_7,
     };
-    adc_channel_t channel[8];
 
     size_t num_channels = 0;
     for (int i = 0; i < 8; i++) {
-        if (channels & (1 << i)) {
-            channel[num_channels++] = all_channels[i];
+        int enabled = !!(channels & (1 << i));
+        printf("Channel CH%d %s enabled\n", i, enabled ? "is" : "is not");
+        if (enabled) {
+            adc_channel_t c = all_channels[i];
+            channel[num_channels++] = c;
         }
     }
 
-    for (int i = 0; i < num_channels; i++) {
-        ESP_ERROR_CHECK(adc1_config_channel_atten(channel[i], ADC_ATTEN_DB_0));
-    }
-
-    if (i2s_adc_init(I2S_NUM_0) != ESP_OK) {
+    ret = i2s_adc_init(I2S_NUM_0);
+    if (ret != ESP_OK) {
         printf("i2s adc init fail\n");
         return ESP_FAIL;
     }
 
-    //Configuring scan 8 channels, you can only scan 1 channel. see dig_i2s_adc.h
-    adc_i2s_scale_mode_init(I2S_ADC_UNIT, channel, num_channels);
+    if (num_channels == 1) {
+        ret = adc_i2s_mode_init(I2S_ADC_UNIT, channel[0]);
+        if (ret != ESP_OK) return ret;
+    } else {
+        //Configuring scan channels
+        ret = adc_i2s_scale_mode_init(I2S_ADC_UNIT, channel, num_channels);
+        if (ret != ESP_OK) return ret;
+    }
+
 
     //ADC sampling rate = 20Msps / clkm_num.
-    i2s_adc_set_clk(I2S_NUM_0, clock_div);
-    if (i2s_adc_driver_install(I2S_NUM_0, NULL, NULL) != ESP_OK){
+    ret = i2s_adc_set_clk(I2S_NUM_0, clock_div);
+    if (ret != ESP_OK) return ret;
+
+    ret = i2s_adc_driver_install(I2S_NUM_0, NULL, NULL);
+    if (ret != ESP_OK){
         printf("driver install fail\n");
-        return ESP_FAIL;
+        return ret;
     }
-    //Uncomment this line only in debug mode.
-    //i2s_adc_check_clk();
+
+#ifdef DEBUG
+    //Out put WS signal from gpio18(only for debug mode)
+    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[18], PIN_FUNC_GPIO);
+    gpio_set_direction(18, GPIO_MODE_DEF_OUTPUT);
+    gpio_matrix_out(18, I2S0I_WS_OUT_IDX, 0, 0);
+#endif
+
     return ESP_OK;
 }
 
@@ -353,6 +365,86 @@ static esp_err_t http_write(struct web_client *c, const void *buf, size_t len)
 }
 
 
+static esp_err_t http_get_query_parameter(struct web_client *c, char *param_name, char *outbuf, size_t outlen)
+{
+    char *haystack = c->query_string;
+    size_t param_name_len = strlen(param_name);
+    if (param_name_len == 0) {
+        return ESP_FAIL;
+    }
+
+    while (1) {
+        if (0 == memcmp(haystack, param_name, param_name_len)) {
+            char term = haystack[param_name_len];
+            if (term == '&' || term == '=' || term == 0) {
+                if (outbuf == NULL || outlen == 0) {
+                    return ESP_OK;
+                } else if (term == '=') {
+                    char *value = haystack + param_name_len + 1;
+                    char *value_end = strchrnul(value, '&');
+                    size_t value_len = value_end - value;
+                    if (value_len >= outlen) {
+                        value_len = outlen - 1;
+                    }
+                    memcpy(outbuf, value, value_len);
+                    outbuf[value_len] = 0;
+                    return ESP_OK;
+                } else {
+                    outbuf[0] = 0;
+                    return ESP_OK;
+                }
+            }
+        }
+
+        haystack = strchr(haystack, '&');
+        if (haystack == NULL) {
+            return ESP_FAIL;
+        } else {
+            haystack++;
+        }
+    }
+}
+
+
+static esp_err_t http_handle_setup(struct web_client *c)
+{
+    esp_err_t ret;
+    char parameter_buf[16];
+    ESP_LOGI(TAG, "Handling a setup http request");
+
+    uint8_t channels = 0x40;  // Default channel: 6
+    uint32_t clk_div = 10;  // Default sampling rate: 2 Msps
+
+    ret = http_get_query_parameter(c, "channels", parameter_buf, sizeof(parameter_buf));
+    if (ret == ESP_OK) {
+        channels = (uint8_t) strtol(parameter_buf, NULL, 16);
+    }
+    ret = http_get_query_parameter(c, "div", parameter_buf, sizeof(parameter_buf));
+    if (ret == ESP_OK) {
+        clk_div = (uint8_t) strtol(parameter_buf, NULL, 10);
+    }
+    ret = i2s_adc_driver_uninstall(I2S_NUM_0);
+    if (ret != ESP_OK) {
+        ESP_LOGI(TAG, "Failed unistalling the driver");
+        goto setup_failed;
+    }
+
+    ret = i2s_adc_setup(channels, clk_div);
+    if (ret != ESP_OK) {
+        goto setup_failed;
+    }
+
+    ret = http_write(c, resp_html_hdr, resp_html_hdr_len);
+    if (ret != ESP_OK) return ret;
+    return http_write(c, "OK", 2);
+
+setup_failed:
+    ret = http_write(c, resp_error_hdr, resp_error_hdr_len);
+    if (ret != ESP_OK) return ret;
+    return http_write(c, webpage_error_start, webpage_error_length);
+}
+
+
 static esp_err_t http_route_request(struct web_client *c)
 {
     esp_err_t ret;
@@ -365,12 +457,20 @@ static esp_err_t http_route_request(struct web_client *c)
         if (ret != ESP_OK) return ret;
         return http_write(c, webpage_index_start, webpage_index_length);
 
-    } else if (0 == strcmp(c->request_uri, "/buffer")) {
+    } else if (0 == strcmp(c->request_uri, "/capture")) {
         ret = http_write(c, resp_binary_hdr, resp_binary_hdr_len);
         if (ret != ESP_OK) return ret;
         ret = scope_acquire();
         if (ret != ESP_OK) return ret;
         return http_write(c, buf, BUF_LEN * sizeof(buf[0]));
+
+    } else if (0 == strcmp(c->request_uri, "/buffer")) {
+        ret = http_write(c, resp_binary_hdr, resp_binary_hdr_len);
+        if (ret != ESP_OK) return ret;
+        return http_write(c, buf, BUF_LEN * sizeof(buf[0]));
+
+    } else if (0 == strcmp(c->request_uri, "/setup")) {
+        return http_handle_setup(c);
 
     } else if (0 == strcmp(c->request_uri, "/dygraph.css")) {
         ret = http_write(c, resp_binary_hdr, resp_binary_hdr_len);
@@ -381,6 +481,11 @@ static esp_err_t http_route_request(struct web_client *c)
         ret = http_write(c, resp_binary_hdr, resp_binary_hdr_len);
         if (ret != ESP_OK) return ret;
         return http_write(c, webpage_dygraph_js_start, webpage_dygraph_js_length);
+
+    } else if (0 == strcmp(c->request_uri, "/favicon.ico")) {
+        ret = http_write(c, resp_icon_hdr, resp_icon_hdr_len);
+        if (ret != ESP_OK) return ret;
+        return http_write(c, webpage_favicon_ico_start, webpage_favicon_ico_length);
     }
 
 notfound:
@@ -500,7 +605,7 @@ void app_main()
     ret = pwm_setup();
     ESP_ERROR_CHECK(ret);
 
-    ret = i2s_adc_setup(0x40, 10);
+    ret = i2s_adc_setup(DEFAULT_CHANNELS_MASK, DEFAULT_CLK_DIV);
     ESP_ERROR_CHECK(ret);
 
     struct sockaddr_in srv_addr;

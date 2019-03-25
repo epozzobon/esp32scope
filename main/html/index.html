@@ -12,7 +12,7 @@
 function getBuffer(callback) {
     var oReq = new XMLHttpRequest();
     oReq.responseType = "arraybuffer";
-    oReq.open("GET", "/buffer", true);
+    oReq.open("GET", "/capture", true);
     oReq.onload = function(oEvent) {
         var arrayBuffer = this.response;
         if (arrayBuffer) {
@@ -32,37 +32,36 @@ function updatePlot() {
     getBuffer(function(samples) {
         var data = [];
         console.log(samples);
-        var idx = 0;
         var firstChannel = samples[samples.length-1] >> 12;
         // FIXME: Sometimes samples are lost :(
 
-        var channelSamples = [0,0,0,0,0,0,0,0];
         for (var i = 0; i < samples.length; i++) {
-            var channel = samples[i] >> 12;
-            channelSamples[channel]++;
-        }
-        console.log(channelSamples);
-
-        var max = (arr) => arr.reduce((a, b) => a > b ? a : b, 0);;
-        var totalSamples = max(channelSamples);
-        for (var i = 0; i < totalSamples; i++) {
             data[i] = [i,-1,-1,-1,-1,-1,-1,-1,-1];
         }
 
-        var channelIndices = [0,0,0,0,0,0,0,0];
         var lastIdx = 0;
+        var channelIndices = [0,0,0,0,0,0,0,0];
+        var samplesChannel = [];
         for (var i = 0; i < samples.length; i++) {
             var pos = i ^ 1;
             var channel = samples[pos] >> 12;
+            samplesChannel[i] = channel;
             var sample = samples[pos] & 0xfff;
 
             var idx = channelIndices[channel];
-            if (idx < lastIdx) { idx = lastIdx; }
+            if (idx < lastIdx) {
+                console.log("Sample " + idx + " lost on channel " + channel);
+                idx = lastIdx;
+            }
             channelIndices[channel] = idx + 1;
 
             data[idx][1+channel] = sample;
+            lastIdx = idx;
         }
-        console.log(channelIndices);
+        data = data.slice(0, lastIdx);
+
+        console.log(samplesChannel);
+
         plot.updateOptions({'file':data});
     });
 }
