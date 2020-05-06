@@ -265,7 +265,7 @@ static esp_err_t scope_acquire() {
         return ret;
     }
 
-    ret = i2s_wait_adc_done(I2S_NUM_0, portMAX_DELAY);
+    ret = i2s_wait_adc_done(I2S_NUM_0, 1000/portTICK_PERIOD_MS);
     if (ret != ESP_OK) {
         printf("i2s_wait_adc_done fail\n");
         return ret;
@@ -412,8 +412,8 @@ static esp_err_t http_handle_setup(struct web_client *c)
     char parameter_buf[16];
     ESP_LOGI(TAG, "Handling a setup http request");
 
-    uint8_t channels = 0x40;  // Default channel: 6
-    uint32_t clk_div = 10;  // Default sampling rate: 2 Msps
+    uint8_t channels = DEFAULT_CHANNELS_MASK;
+    uint32_t clk_div = DEFAULT_CLK_DIV;
 
     ret = http_get_query_parameter(c, "channels", parameter_buf, sizeof(parameter_buf));
     if (ret == ESP_OK) {
@@ -633,8 +633,8 @@ void app_main()
     accept_sem = xSemaphoreCreateMutexStatic(&accept_sem_buf);
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        sprintf(clients[i].task_name, "client_%d", i);
-        xTaskCreate(http_client_task, clients[i].task_name, 2048, (void *)i, 5, NULL);
+        sprintf(clients[i].task_name, "client_%d", (uint8_t) i);
+        xTaskCreate(http_client_task, clients[i].task_name, 3000, (void *)i, 5, NULL);
     }
 
 error:

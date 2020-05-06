@@ -170,6 +170,9 @@ esp_err_t i2s_adc_driver_uninstall(i2s_port_t i2s_num)
         }
         esp_intr_free(i2s_adc_obj[i2s_num]->i2s_isr_handle);
         free(i2s_adc_obj[i2s_num]);
+        i2s_adc_obj[i2s_num] = NULL;
+    } else {
+        ESP_LOGD(I2S_ADC_TAG, "driver aleardy uninstalled");
     }
     return ESP_OK;
 }
